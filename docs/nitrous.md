@@ -13,9 +13,11 @@ fills it and nothing reads it back. This feature supplies both ends from game da
   `engine*1000+level`) with `Upgrades` tiles for the three fuel system variants (types 4, 44,
   45): Nitrous 1.5x, 2x, 2.5x, 3x, 4x. A media.zip/DLC patch DB adds them; without one no car has a
   tier and the hook never acts.
-- A car's tier is read while its parts are built (`sub_82CBCAAC`, part enum 16) and
-  remembered for the car (`ForzaNitrousInit_82DF87C4`, after 82DF8790..87C0).
-- The boost scales the engine torque scale at car+2644 for the duration of `sub_82DF5A70`.
+- The player's vehicle is found the way the head-to-head challenges find it; its 45 installed part
+  ids start at vehicle+0x2E58 and the Fuel System is at index 18. `id % 1000` in 4..8 is the tier.
+- While the shot is on, the engine's torque scale (engine object vehicle+0x50, offset 2644) is
+  multiplied by the tier's factor and put back when it ends. No code is hooked: it runs from the
+  controller read (`kernel/input_autopress.cpp`) and D-pad Down is never hidden from the game.
 
 ## Tank
 
@@ -24,10 +26,9 @@ fills it and nothing reads it back. This feature supplies both ends from game da
 
 ## Known limits
 
-- Not validated in game. TU4 addresses were found by comparing against the FH2 Fast & Furious
-  build and by reading the code: 82CBCAAC (part records), 82DF87C4 (car setup), 82DF5A70 (engine
-  torque), car+2644. Watch the log for `NITROUS:` lines.
-- Any car whose parts include a nitrous tier gets the shot when the button is held, not only the
-  player's. Tiers only come from the player's garage in practice.
-- No HUD gauge yet; the log reports on/off and tank level.
+- Not fully validated in game. The first versions hooked the engine torque functions
+  (82DF5A70 and the four other places that read car+2644); in the log those run a few times a
+  second for every car and almost never for the player's, so they are not the driving physics.
+  Watch the log for `NITROUS:` lines; `on x3 (torque scale a -> b)` shows the write happened.
+- The player's tank only; no HUD gauge yet (the log reports on/off and tank level).
 - Time is host time, not game time.
