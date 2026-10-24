@@ -155,6 +155,17 @@ uint16_t forza::NitrousPad(uint16_t buttons) {
   if (held.exchange(down, std::memory_order_relaxed) != down)
     REXLOG_INFO("NITROUS: D-pad Down {} (a car has a tier: {})", down ? "pressed" : "released",
                 any.load(std::memory_order_relaxed) ? "yes" : "no");
+  if (any.load(std::memory_order_relaxed)) {
+    // The tank runs here, on the pad's clock, so a held button counts even when the torque code runs
+    // only a few times a second.
+    std::lock_guard<std::mutex> guard(lock);
+    if (player.tier > 0) {
+      const bool was = player.boosting;
+      Step(player, Clock::now());
+      if (was != player.boosting)
+        REXLOG_INFO("NITROUS: {} (tank {:.0f}%)", player.boosting ? "on" : "off", player.tank * 100.0);
+    }
+  }
   return any.load(std::memory_order_relaxed) ? kDpadDown : 0;
 }
 
@@ -163,7 +174,7 @@ uint16_t forza::NitrousPad(uint16_t buttons) {
 // driving physics uses is not known yet, so all are hooked and the log counts the calls per site.
 namespace {
 constexpr int kSites = 5;
-uint32_t site_calls[kSites], site_scaled[kSites];
+uint32_t site_calls[kSites], site_player[kSites], site_scaled[kSites];
 
 // The factor for this call: the player's tier scale while the shot is on, else 1.
 double Factor(int site, uint32_t car) {
@@ -183,12 +194,14 @@ double Factor(int site, uint32_t car) {
   ++site_calls[site];
   if (Clock::now() - said_at > std::chrono::seconds(5)) {
     said_at = Clock::now();
-    REXLOG_INFO("NITROUS: torque calls per site 5AB0 {} 5AE4 {} 63F8 {} 68A0 {} 6DA8 {}; boosted {} {} {} {} {}",
-                site_calls[0], site_calls[1], site_calls[2], site_calls[3], site_calls[4], site_scaled[0],
-                site_scaled[1], site_scaled[2], site_scaled[3], site_scaled[4]);
-    for (int i = 0; i < kSites; ++i) site_calls[i] = site_scaled[i] = 0;
+    REXLOG_INFO("NITROUS: torque calls per site 5AB0 {} 5AE4 {} 63F8 {} 68A0 {} 6DA8 {}; the player's {} {} {} {} {}; boosted {} {} {} {} {}",
+                site_calls[0], site_calls[1], site_calls[2], site_calls[3], site_calls[4], site_player[0],
+                site_player[1], site_player[2], site_player[3], site_player[4], site_scaled[0], site_scaled[1],
+                site_scaled[2], site_scaled[3], site_scaled[4]);
+    for (int i = 0; i < kSites; ++i) site_calls[i] = site_player[i] = site_scaled[i] = 0;
   }
   if (tier < 0) return 1.0;
+  ++site_player[site];
   if (tier == 0) {
     if (player.tier > 0) REXLOG_INFO("NITROUS: the player's car has no tier now");
     player = State{};
@@ -201,11 +214,7 @@ double Factor(int site, uint32_t car) {
     REXLOG_INFO("NITROUS: car {:08X} tier {} (x{})", car, tier, kTierScale[tier - 1]);
   }
   any.store(true, std::memory_order_relaxed);
-  const bool was = player.boosting;
-  const bool on = Step(player, Clock::now());
-  if (was != player.boosting)
-    REXLOG_INFO("NITROUS: {} (tank {:.0f}%)", player.boosting ? "on" : "off", player.tank * 100.0);
-  if (!on) return 1.0;
+  if (!player.boosting) return 1.0;
   ++site_scaled[site];
   return double(kTierScale[tier - 1]);
 }
