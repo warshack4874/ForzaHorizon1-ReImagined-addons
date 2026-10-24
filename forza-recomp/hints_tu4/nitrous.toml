@@ -1,0 +1,6 @@
+# Nitrous (src/hooks/nitrous.cpp, docs/nitrous.md): right after the car setup copies the engine's
+# nitrous block into the car (82DF8790..82DF87C0 store car+1768..1788; r31 is the car).
+[[midasm_hook]]
+address = 0x82DF87C4
+name = "ForzaNitrousInit_82DF87C4"
+registers = ["r3"]

@@ -59,6 +59,7 @@ using forza::GuestPtr;
 
 namespace forza {
 uint16_t WorldChallengePad(uint16_t buttons);  // hooks/world_challenge.cpp
+uint16_t NitrousPad(uint16_t buttons);  // hooks/nitrous.cpp
 uint16_t LiveInvitePad(uint16_t buttons, int left_y, bool& block_all);  // kernel/live_invites.cpp
 uint16_t LiveFriendsPad(uint16_t buttons, int left_x, int left_y, bool& block_all);  // live_friends.cpp
 uint16_t KeyboardUiPad(uint16_t buttons, int left_x, int left_y, bool& block_all);  // xam_keyboard.cpp
@@ -383,6 +384,7 @@ extern "C" REX_FUNC(__imp__XamInputGetState) {
     }
     if (block_all) state = PadState{};
     state.buttons &= uint16_t(~forza::WorldChallengePad(state.buttons));
+    state.buttons &= uint16_t(~forza::NitrousPad(state.buttons));
     if (forza::benchmark::WantsPad()) {
       bool capture = false;
       const auto buttons = forza::benchmark::Pad(state.buttons, capture);

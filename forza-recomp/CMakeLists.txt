@@ -147,6 +147,7 @@ set(FORZA_SOURCES
     src/hooks/scene_tiling.cpp
     src/hooks/world_detail.cpp
     src/hooks/physics_loader_check.cpp
+    src/hooks/nitrous.cpp
     src/hooks/resource_data_release.cpp
     src/hooks/resource_cache_eviction.cpp
     src/hooks/resource_stream_trace.cpp
