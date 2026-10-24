@@ -76,6 +76,7 @@ struct State {
 std::mutex lock;
 State player;  // the player's car (one tank)
 std::atomic<bool> any{false};
+std::atomic<int64_t> last_player_ns{0};  // when the player's engine torque last ran (not in menus)
 std::atomic<bool> held{false};
 uint32_t diag_car = 0;
 uint32_t known_car = 0;  // the player's car last seen with its part ids logged
@@ -148,25 +149,32 @@ bool Step(State& s, Clock::time_point now) {
 }  // namespace
 
 // Player 1's pad, every XamInputGetState (kernel/input_autopress.cpp): remember the button and,
-// while some car has a tier, hide it from the game.
+// and run the tank. The button is never hidden from the game.
 uint16_t forza::NitrousPad(uint16_t buttons) {
   if (!Enabled()) { held = false; return 0; }
   const bool down = (buttons & kDpadDown) != 0;
+  // Driving: the player's engine torque ran in the last 2 seconds (it does not in menus).
+  const bool driving = Clock::now().time_since_epoch().count() - last_player_ns.load(std::memory_order_relaxed) <
+                       std::chrono::duration_cast<Clock::duration>(std::chrono::seconds(2)).count();
   if (held.exchange(down, std::memory_order_relaxed) != down)
-    REXLOG_INFO("NITROUS: D-pad Down {} (a car has a tier: {})", down ? "pressed" : "released",
-                any.load(std::memory_order_relaxed) ? "yes" : "no");
-  if (any.load(std::memory_order_relaxed)) {
+    REXLOG_INFO("NITROUS: D-pad Down {} (driving a car with a tier: {})", down ? "pressed" : "released",
+                driving && any.load(std::memory_order_relaxed) ? "yes" : "no");
+  std::lock_guard<std::mutex> guard(lock);
+  if (player.tier > 0) {
     // The tank runs here, on the pad's clock, so a held button counts even when the torque code runs
-    // only a few times a second.
-    std::lock_guard<std::mutex> guard(lock);
-    if (player.tier > 0) {
-      const bool was = player.boosting;
+    // only a few times a second. Out of the car (menus) the shot is off and the tank refills.
+    const bool was = player.boosting;
+    if (driving && any.load(std::memory_order_relaxed)) {
       Step(player, Clock::now());
-      if (was != player.boosting)
-        REXLOG_INFO("NITROUS: {} (tank {:.0f}%)", player.boosting ? "on" : "off", player.tank * 100.0);
+    } else {
+      held.store(false, std::memory_order_relaxed);
+      Step(player, Clock::now());
+      held.store(down, std::memory_order_relaxed);
     }
+    if (was != player.boosting)
+      REXLOG_INFO("NITROUS: {} (tank {:.0f}%)", player.boosting ? "on" : "off", player.tank * 100.0);
   }
-  return any.load(std::memory_order_relaxed) ? kDpadDown : 0;
+  return 0;  // never hide the button from the game
 }
 
 // hints_tu4/nitrous.toml: five places load car[+2644] (the engine torque scale) into an FPR and
@@ -202,6 +210,7 @@ double Factor(int site, uint32_t car) {
   }
   if (tier < 0) return 1.0;
   ++site_player[site];
+  last_player_ns.store(Clock::now().time_since_epoch().count(), std::memory_order_relaxed);
   if (tier == 0) {
     if (player.tier > 0) REXLOG_INFO("NITROUS: the player's car has no tier now");
     player = State{};
