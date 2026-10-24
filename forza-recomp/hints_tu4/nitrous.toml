@@ -1,5 +1,6 @@
-# Nitrous (src/hooks/nitrous.cpp, docs/nitrous.md): the engine torque (sub_82DF5A70, r31 = the car)
-# loads car+2644 into f0 at 82DF5AAC and 82DF5AE0; these hooks run right after each load.
+# Nitrous (src/hooks/nitrous.cpp, docs/nitrous.md): the engine code loads car+2644 (the engine torque
+# scale) into an FPR at these places and multiplies it into the torque; each hook runs right after the
+# load (r31, or r3 at 82DF63F8, is the car).
 [[midasm_hook]]
 address = 0x82DF5AB0
 name = "ForzaNitrousTorque1_82DF5AB0"
@@ -8,4 +9,19 @@ registers = ["r3"]
 [[midasm_hook]]
 address = 0x82DF5AE4
 name = "ForzaNitrousTorque2_82DF5AE4"
+registers = ["r3"]
+
+[[midasm_hook]]
+address = 0x82DF63F8
+name = "ForzaNitrousTorque3_82DF63F8"
+registers = ["r3"]
+
+[[midasm_hook]]
+address = 0x82DF68A0
+name = "ForzaNitrousTorque4_82DF68A0"
+registers = ["r3"]
+
+[[midasm_hook]]
+address = 0x82DF6DA8
+name = "ForzaNitrousTorque5_82DF6DA8"
 registers = ["r3"]

@@ -94,23 +94,19 @@ uint32_t Load32(uint8_t* base, uint32_t address) {
 }
 bool Plausible(uint32_t address) { return address >= 0x00100000 && address < 0xF0000000; }
 
-// The tier of the player's car when `car` is it (0 otherwise); logs the part ids once per car.
+// The tier of the player's car when `car` is it (-1 when it is not the player's engine); logs the part ids once per car.
 int PlayerTier(uint8_t* base, uint32_t car) {
-  const bool diag = diag_car != car;  // log what the lookup sees once per car (r31 of the torque)
-  if (diag) {
-    diag_car = car;
-    REXLOG_INFO("NITROUS: torque hook running for car {:08X}", car);
-  }
+  const bool diag = false;  // (the per-car vehicle dump was for finding the right object; it stays off)
   const uint32_t root = Load32(base, kCarRoot);
-  if (!Plausible(root)) { if (diag) REXLOG_INFO("NITROUS: root {:08X} not plausible", root); return 0; }
+  if (!Plausible(root)) { if (diag) REXLOG_INFO("NITROUS: root {:08X} not plausible", root); return -1; }
   const uint32_t holder = Load32(base, root + 4);
-  if (!Plausible(holder)) { if (diag) REXLOG_INFO("NITROUS: holder {:08X} not plausible", holder); return 0; }
+  if (!Plausible(holder)) { if (diag) REXLOG_INFO("NITROUS: holder {:08X} not plausible", holder); return -1; }
   const uint32_t list = Load32(base, holder + 4);
-  if (!Plausible(list)) { if (diag) REXLOG_INFO("NITROUS: list {:08X} not plausible", list); return 0; }
+  if (!Plausible(list)) { if (diag) REXLOG_INFO("NITROUS: list {:08X} not plausible", list); return -1; }
   const uint32_t first = Load32(base, list + 0x80), end = Load32(base, list + 0x84);
   if (!Plausible(first) || end < first || end - first > 4 * 64) {
     if (diag) REXLOG_INFO("NITROUS: vehicle vector {:08X}..{:08X} not plausible", first, end);
-    return 0;
+    return -1;
   }
   for (uint32_t slot = first; slot < end; slot += 4) {
     const uint32_t vehicle = Load32(base, slot);
@@ -129,7 +125,7 @@ int PlayerTier(uint8_t* base, uint32_t car) {
     }
     return tier;
   }
-  return 0;
+  return -1;
 }
 
 // Advance one car's tank to now; true while the shot is on.
@@ -162,60 +158,63 @@ uint16_t forza::NitrousPad(uint16_t buttons) {
   return any.load(std::memory_order_relaxed) ? kDpadDown : 0;
 }
 
-// hints_tu4/nitrous.toml: the engine torque has just loaded car[+2644] into f0 (r31 = the car). The
-// first hook (82DF5AB0) steps the tank, the second (82DF5AE4, the same call) reuses the result.
+// hints_tu4/nitrous.toml: five places load car[+2644] (the engine torque scale) into an FPR and
+// multiply it into the engine's torque; each hook runs right after such a load. Which of them the
+// driving physics uses is not known yet, so all are hooked and the log counts the calls per site.
 namespace {
-bool on_this_call = false;  // the first hook decided; the second hook of the same call follows it
-float scale_this_call = 1.0f;
+constexpr int kSites = 5;
+uint32_t site_calls[kSites], site_scaled[kSites];
 
-void ScaleF0(PPCRegister& r3, bool first) {
-  PPCContext& ctx = *reinterpret_cast<PPCContext*>(&r3);
-  if (first) {
-    on_this_call = false;
-    static bool said = false;
-    if (!said) {
-      said = true;
-      REXLOG_INFO("NITROUS: the torque hook is live (forza_nitrous {})", Enabled() ? "on" : "off");
-    }
-    if (!Enabled()) {
-      any.store(false, std::memory_order_relaxed);
-      return;
-    }
-    uint8_t* base = rex::system::kernel_state()->memory()->virtual_membase();
-    const uint32_t car = ctx.r31.u32;
-    std::lock_guard<std::mutex> guard(lock);
-    const int tier = PlayerTier(base, car);
-    static uint32_t calls = 0, hits = 0;
-    static Clock::time_point said_at{};
-    ++calls;
-    if (tier > 0) ++hits;
-    if (Clock::now() - said_at > std::chrono::seconds(5)) {
-      said_at = Clock::now();
-      REXLOG_INFO("NITROUS: torque calls {} (tier hits {}), last car {:08X}", calls, hits, car);
-      calls = hits = 0;
-    }
-    if (tier <= 0) {
-      if (player.tier > 0) REXLOG_INFO("NITROUS: car {:08X} has no tier now", car);
-      player = State{};
-      any.store(false, std::memory_order_relaxed);
-      return;
-    }
-    if (player.tier != tier) {
-      player = State{};
-      player.tier = tier;
-      REXLOG_INFO("NITROUS: car {:08X} tier {} (x{})", car, tier, kTierScale[tier - 1]);
-    }
-    any.store(true, std::memory_order_relaxed);
-    const bool was = player.boosting;
-    on_this_call = Step(player, Clock::now());
-    scale_this_call = kTierScale[tier - 1];
-    if (was != player.boosting)
-      REXLOG_INFO("NITROUS: {} (tank {:.0f}%)", player.boosting ? "on" : "off", player.tank * 100.0);
+// The factor for this call: the player's tier scale while the shot is on, else 1.
+double Factor(int site, uint32_t car) {
+  static bool said = false;
+  if (!said) {
+    said = true;
+    REXLOG_INFO("NITROUS: the torque hooks are live (forza_nitrous {})", Enabled() ? "on" : "off");
   }
-  if (on_this_call) ctx.f0.f64 *= double(scale_this_call);
+  if (!Enabled()) {
+    any.store(false, std::memory_order_relaxed);
+    return 1.0;
+  }
+  uint8_t* base = rex::system::kernel_state()->memory()->virtual_membase();
+  std::lock_guard<std::mutex> guard(lock);
+  const int tier = PlayerTier(base, car);  // -1: not the player's engine
+  static Clock::time_point said_at{};
+  ++site_calls[site];
+  if (Clock::now() - said_at > std::chrono::seconds(5)) {
+    said_at = Clock::now();
+    REXLOG_INFO("NITROUS: torque calls per site 5AB0 {} 5AE4 {} 63F8 {} 68A0 {} 6DA8 {}; boosted {} {} {} {} {}",
+                site_calls[0], site_calls[1], site_calls[2], site_calls[3], site_calls[4], site_scaled[0],
+                site_scaled[1], site_scaled[2], site_scaled[3], site_scaled[4]);
+    for (int i = 0; i < kSites; ++i) site_calls[i] = site_scaled[i] = 0;
+  }
+  if (tier < 0) return 1.0;
+  if (tier == 0) {
+    if (player.tier > 0) REXLOG_INFO("NITROUS: the player's car has no tier now");
+    player = State{};
+    any.store(false, std::memory_order_relaxed);
+    return 1.0;
+  }
+  if (player.tier != tier) {
+    player = State{};
+    player.tier = tier;
+    REXLOG_INFO("NITROUS: car {:08X} tier {} (x{})", car, tier, kTierScale[tier - 1]);
+  }
+  any.store(true, std::memory_order_relaxed);
+  const bool was = player.boosting;
+  const bool on = Step(player, Clock::now());
+  if (was != player.boosting)
+    REXLOG_INFO("NITROUS: {} (tank {:.0f}%)", player.boosting ? "on" : "off", player.tank * 100.0);
+  if (!on) return 1.0;
+  ++site_scaled[site];
+  return double(kTierScale[tier - 1]);
 }
+PPCContext& Ctx(PPCRegister& r3) { return *reinterpret_cast<PPCContext*>(&r3); }
 }  // namespace
 
-void ForzaNitrousTorque1_82DF5AB0(PPCRegister& r3) { ScaleF0(r3, true); }
-void ForzaNitrousTorque2_82DF5AE4(PPCRegister& r3) { ScaleF0(r3, false); }
+void ForzaNitrousTorque1_82DF5AB0(PPCRegister& r3) { auto& c = Ctx(r3); c.f0.f64 *= Factor(0, c.r31.u32); }
+void ForzaNitrousTorque2_82DF5AE4(PPCRegister& r3) { auto& c = Ctx(r3); c.f0.f64 *= Factor(1, c.r31.u32); }
+void ForzaNitrousTorque3_82DF63F8(PPCRegister& r3) { auto& c = Ctx(r3); c.f11.f64 *= Factor(2, c.r3.u32); }
+void ForzaNitrousTorque4_82DF68A0(PPCRegister& r3) { auto& c = Ctx(r3); c.f13.f64 *= Factor(3, c.r31.u32); }
+void ForzaNitrousTorque5_82DF6DA8(PPCRegister& r3) { auto& c = Ctx(r3); c.f2.f64 *= Factor(4, c.r31.u32); }
 #endif  // FORZA_TU4
