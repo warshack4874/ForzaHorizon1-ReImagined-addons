@@ -57,6 +57,7 @@ namespace {
 
 constexpr uint32_t kCarRoot = FORZA_ADDR(0x832DF024);
 constexpr uint32_t kVehicleCar = 0x2D90, kVehicleKind = 0x2DD0, kVehicleParts = 0x2E58;
+constexpr uint32_t kVehicleEngineObject = 0x50;  // the torque's r31 is vehicle+0x50 (seen in the log)
 constexpr int kPartCount = 45;
 constexpr uint16_t kDpadDown = 0x0002;
 constexpr int kFuelSystemPartEnum = 16;
@@ -117,7 +118,7 @@ int PlayerTier(uint8_t* base, uint32_t car) {
       REXLOG_INFO("NITROUS: vehicle {:08X} kind {} car {:08X}", vehicle, Load32(base, vehicle + kVehicleKind),
                   Load32(base, vehicle + kVehicleCar));
     if (!Plausible(vehicle) || Load32(base, vehicle + kVehicleKind) != 0) continue;
-    if (Load32(base, vehicle + kVehicleCar) != car) continue;
+    if (vehicle + kVehicleEngineObject != car) continue;
     const uint32_t fuel = Load32(base, vehicle + kVehicleParts + 4 * kFuelSystemPartEnum);
     const int tier = TierOfPart(fuel);
     if (known_car != car) {
@@ -181,6 +182,15 @@ void ScaleF0(PPCRegister& r3, bool first) {
     const uint32_t car = ctx.r31.u32;
     std::lock_guard<std::mutex> guard(lock);
     const int tier = PlayerTier(base, car);
+    static uint32_t calls = 0, hits = 0;
+    static Clock::time_point said_at{};
+    ++calls;
+    if (tier > 0) ++hits;
+    if (Clock::now() - said_at > std::chrono::seconds(5)) {
+      said_at = Clock::now();
+      REXLOG_INFO("NITROUS: torque calls {} (tier hits {}), last car {:08X}", calls, hits, car);
+      calls = hits = 0;
+    }
     if (tier <= 0) {
       if (player.tier > 0) REXLOG_INFO("NITROUS: car {:08X} has no tier now", car);
       player = State{};
