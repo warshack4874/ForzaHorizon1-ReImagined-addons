@@ -155,7 +155,10 @@ bool Step(State& s, Clock::time_point now) {
 // while some car has a tier, hide it from the game.
 uint16_t forza::NitrousPad(uint16_t buttons) {
   if (!Enabled()) { held = false; return 0; }
-  held.store((buttons & kDpadDown) != 0, std::memory_order_relaxed);
+  const bool down = (buttons & kDpadDown) != 0;
+  if (held.exchange(down, std::memory_order_relaxed) != down)
+    REXLOG_INFO("NITROUS: D-pad Down {} (a car has a tier: {})", down ? "pressed" : "released",
+                any.load(std::memory_order_relaxed) ? "yes" : "no");
   return any.load(std::memory_order_relaxed) ? kDpadDown : 0;
 }
 
