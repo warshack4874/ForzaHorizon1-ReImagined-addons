@@ -76,6 +76,7 @@ std::mutex lock;
 State player;  // the player's car (one tank)
 std::atomic<bool> any{false};
 std::atomic<bool> held{false};
+uint32_t diag_car = 0;
 uint32_t known_car = 0;  // the player's car last seen with its part ids logged
 
 bool Enabled() { return REXCVAR_GET(forza_nitrous); }
@@ -94,16 +95,27 @@ bool Plausible(uint32_t address) { return address >= 0x00100000 && address < 0xF
 
 // The tier of the player's car when `car` is it (0 otherwise); logs the part ids once per car.
 int PlayerTier(uint8_t* base, uint32_t car) {
+  const bool diag = diag_car != car;  // log what the lookup sees once per car (r31 of the torque)
+  if (diag) {
+    diag_car = car;
+    REXLOG_INFO("NITROUS: torque hook running for car {:08X}", car);
+  }
   const uint32_t root = Load32(base, kCarRoot);
-  if (!Plausible(root)) return 0;
+  if (!Plausible(root)) { if (diag) REXLOG_INFO("NITROUS: root {:08X} not plausible", root); return 0; }
   const uint32_t holder = Load32(base, root + 4);
-  if (!Plausible(holder)) return 0;
+  if (!Plausible(holder)) { if (diag) REXLOG_INFO("NITROUS: holder {:08X} not plausible", holder); return 0; }
   const uint32_t list = Load32(base, holder + 4);
-  if (!Plausible(list)) return 0;
+  if (!Plausible(list)) { if (diag) REXLOG_INFO("NITROUS: list {:08X} not plausible", list); return 0; }
   const uint32_t first = Load32(base, list + 0x80), end = Load32(base, list + 0x84);
-  if (!Plausible(first) || end < first || end - first > 4 * 64) return 0;
+  if (!Plausible(first) || end < first || end - first > 4 * 64) {
+    if (diag) REXLOG_INFO("NITROUS: vehicle vector {:08X}..{:08X} not plausible", first, end);
+    return 0;
+  }
   for (uint32_t slot = first; slot < end; slot += 4) {
     const uint32_t vehicle = Load32(base, slot);
+    if (diag && Plausible(vehicle))
+      REXLOG_INFO("NITROUS: vehicle {:08X} kind {} car {:08X}", vehicle, Load32(base, vehicle + kVehicleKind),
+                  Load32(base, vehicle + kVehicleCar));
     if (!Plausible(vehicle) || Load32(base, vehicle + kVehicleKind) != 0) continue;
     if (Load32(base, vehicle + kVehicleCar) != car) continue;
     const uint32_t fuel = Load32(base, vehicle + kVehicleParts + 4 * kFuelSystemPartEnum);
@@ -156,6 +168,11 @@ void ScaleF0(PPCRegister& r3, bool first) {
   PPCContext& ctx = *reinterpret_cast<PPCContext*>(&r3);
   if (first) {
     on_this_call = false;
+    static bool said = false;
+    if (!said) {
+      said = true;
+      REXLOG_INFO("NITROUS: the torque hook is live (forza_nitrous {})", Enabled() ? "on" : "off");
+    }
     if (!Enabled()) {
       any.store(false, std::memory_order_relaxed);
       return;
