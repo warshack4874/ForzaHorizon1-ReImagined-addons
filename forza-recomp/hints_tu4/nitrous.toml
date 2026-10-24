@@ -1,6 +1,11 @@
-# Nitrous (src/hooks/nitrous.cpp, docs/nitrous.md): right after the car setup copies the engine's
-# nitrous block into the car (82DF8790..82DF87C0 store car+1768..1788; r31 is the car).
+# Nitrous (src/hooks/nitrous.cpp, docs/nitrous.md): the engine torque (sub_82DF5A70, r31 = the car)
+# loads car+2644 into f0 at 82DF5AAC and 82DF5AE0; these hooks run right after each load.
 [[midasm_hook]]
-address = 0x82DF87C4
-name = "ForzaNitrousInit_82DF87C4"
+address = 0x82DF5AB0
+name = "ForzaNitrousTorque1_82DF5AB0"
+registers = ["r3"]
+
+[[midasm_hook]]
+address = 0x82DF5AE4
+name = "ForzaNitrousTorque2_82DF5AE4"
 registers = ["r3"]

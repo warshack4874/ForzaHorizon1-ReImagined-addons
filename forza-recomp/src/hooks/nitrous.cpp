@@ -5,15 +5,15 @@
 // tu_address_map: TU4 addresses (the base game build gets an inert pad filter).
 //
 // What the game gives us (TU4):
-//  - sub_82CBCAAC creates one engine part record per installed part: r5 = part enum (16 =
-//    Fuel System), r7 = the part's id in its List_UpgradeEngine* table. Fuel System ids are
-//    engine*1000+level, so id % 1000 in 4..8 is nitrous tier 1..5.
-//  - the car's setup copies the engine's nitrous block into the car at 82DF8790..82DF87C0
-//    (car+1768..1788; FH2 reads them, FH1 never does). A mid-function hook right after
-//    (82DF87C4, r31 = the car) records the tier the part records just announced.
-//  - sub_82DF5A70 computes the engine's torque: curve value * car[+2644] (the engine torque
-//    scale) * car[+420] * car[+424] * ... It runs for every car. For a car with a tier and a
-//    held button we multiply car[+2644] for the duration of the call and put it back.
+//  - the player's vehicle: root = *(0x832DF024), list = *(*(root + 4) + 4), the vector at list+0x80,
+//    the slot whose vehicle+0x2DD0 is 0 (this console's player). Its car is *(vehicle+0x2D90) and its
+//    45 installed part ids start at vehicle+0x2E58 (the same blocks world_challenge.cpp and
+//    native_car_tuning.cpp read). Fuel System is part enum 16; its ids are engine*1000+level, so
+//    id % 1000 in 4..8 is nitrous tier 1..5.
+//  - the engine's torque (sub_82DF5A70, r31 = the car) loads car[+2644] (the engine torque scale)
+//    twice, at 82DF5AAC and 82DF5AE0, into f0 and multiplies it into the result. Mid-function hooks
+//    right after each load scale f0 while the player's car has a tier and the shot is on. The
+//    function is only entered indirectly, so it is hooked in the middle and not overridden.
 #include "../platform/guest_addr.h"
 
 #include <cstddef>
@@ -34,6 +34,8 @@ uint16_t NitrousPad(uint16_t) { return 0; }
 #include <rex/logging.h>
 #include <rex/ppc/context.h>
 #include <rex/ppc/func.h>
+#include <rex/system/kernel_state.h>
+#include <rex/system/xmemory.h>
 
 #include <algorithm>
 #include <atomic>
@@ -41,7 +43,7 @@ uint16_t NitrousPad(uint16_t) { return 0; }
 #include <chrono>
 #include <cstring>
 #include <mutex>
-#include <unordered_map>
+#include <string>
 
 REXCVAR_DEFINE_BOOL(forza_nitrous, false, "Game",
                     "Nitrous: hold D-pad Down with a Fuel System nitrous tier installed");
@@ -53,7 +55,9 @@ static_assert(offsetof(PPCContext, r3) == 0, "hooks recover ctx from &ctx.r3");
 
 namespace {
 
-constexpr uint32_t kEngineTorqueScaleOffset = 2644;  // car+2644, read by sub_82DF5A70
+constexpr uint32_t kCarRoot = FORZA_ADDR(0x832DF024);
+constexpr uint32_t kVehicleCar = 0x2D90, kVehicleKind = 0x2DD0, kVehicleParts = 0x2E58;
+constexpr int kPartCount = 45;
 constexpr uint16_t kDpadDown = 0x0002;
 constexpr int kFuelSystemPartEnum = 16;
 constexpr float kTierScale[] = {1.5f, 2.0f, 2.5f, 3.0f, 4.0f};  // tiers 1..5
@@ -69,10 +73,10 @@ struct State {
 };
 
 std::mutex lock;
-std::unordered_map<uint32_t, State> cars;  // guest car address -> state
+State player;  // the player's car (one tank)
 std::atomic<bool> any{false};
 std::atomic<bool> held{false};
-thread_local int pending_tier = 0;  // set by the part records of the car being built
+uint32_t known_car = 0;  // the player's car last seen with its part ids logged
 
 bool Enabled() { return REXCVAR_GET(forza_nitrous); }
 
@@ -86,9 +90,33 @@ uint32_t Load32(uint8_t* base, uint32_t address) {
   const uint8_t* p = forza::GuestPtr(base, address);
   return uint32_t(p[0]) << 24 | uint32_t(p[1]) << 16 | uint32_t(p[2]) << 8 | p[3];
 }
-void Store32(uint8_t* base, uint32_t address, uint32_t v) {
-  uint8_t* p = forza::GuestPtr(base, address);
-  p[0] = uint8_t(v >> 24); p[1] = uint8_t(v >> 16); p[2] = uint8_t(v >> 8); p[3] = uint8_t(v);
+bool Plausible(uint32_t address) { return address >= 0x00100000 && address < 0xF0000000; }
+
+// The tier of the player's car when `car` is it (0 otherwise); logs the part ids once per car.
+int PlayerTier(uint8_t* base, uint32_t car) {
+  const uint32_t root = Load32(base, kCarRoot);
+  if (!Plausible(root)) return 0;
+  const uint32_t holder = Load32(base, root + 4);
+  if (!Plausible(holder)) return 0;
+  const uint32_t list = Load32(base, holder + 4);
+  if (!Plausible(list)) return 0;
+  const uint32_t first = Load32(base, list + 0x80), end = Load32(base, list + 0x84);
+  if (!Plausible(first) || end < first || end - first > 4 * 64) return 0;
+  for (uint32_t slot = first; slot < end; slot += 4) {
+    const uint32_t vehicle = Load32(base, slot);
+    if (!Plausible(vehicle) || Load32(base, vehicle + kVehicleKind) != 0) continue;
+    if (Load32(base, vehicle + kVehicleCar) != car) continue;
+    const uint32_t fuel = Load32(base, vehicle + kVehicleParts + 4 * kFuelSystemPartEnum);
+    const int tier = TierOfPart(fuel);
+    if (known_car != car) {
+      known_car = car;
+      std::string ids;
+      for (int i = 0; i < kPartCount; ++i) ids += std::to_string(Load32(base, vehicle + kVehicleParts + 4 * i)) + " ";
+      REXLOG_INFO("NITROUS: player car {:08X} fuel part {} tier {}; parts {}", car, fuel, tier, ids);
+    }
+    return tier;
+  }
+  return 0;
 }
 
 // Advance one car's tank to now; true while the shot is on.
@@ -118,53 +146,46 @@ uint16_t forza::NitrousPad(uint16_t buttons) {
   return any.load(std::memory_order_relaxed) ? kDpadDown : 0;
 }
 
-// A part record is being made: remember the Fuel System's tier for the car that follows.
-extern "C" REX_FUNC(__imp__sub_82CBCAAC);
-extern "C" REX_FUNC(sub_82CBCAAC) {
-  if (int32_t(ctx.r5.u32) == kFuelSystemPartEnum) pending_tier = Enabled() ? TierOfPart(ctx.r7.u32) : 0;
-  __imp__sub_82CBCAAC(ctx, base);
-}
+// hints_tu4/nitrous.toml: the engine torque has just loaded car[+2644] into f0 (r31 = the car). The
+// first hook (82DF5AB0) steps the tank, the second (82DF5AE4, the same call) reuses the result.
+namespace {
+bool on_this_call = false;  // the first hook decided; the second hook of the same call follows it
+float scale_this_call = 1.0f;
 
-// hints_tu4/nitrous.toml: after the car copied the engine's nitrous block (r31 = the car).
-void ForzaNitrousInit_82DF87C4(PPCRegister& r3) {
+void ScaleF0(PPCRegister& r3, bool first) {
   PPCContext& ctx = *reinterpret_cast<PPCContext*>(&r3);
-  const uint32_t car = ctx.r31.u32;
-  std::lock_guard<std::mutex> guard(lock);
-  if (!Enabled() || pending_tier <= 0) {
-    cars.erase(car);
-  } else {
-    State& s = cars[car];
-    s.tier = pending_tier;
-    s.tank = 1.0;
-    s.last = {};
-    REXLOG_INFO("NITROUS: car {:08X} tier {} (x{})", car, s.tier, kTierScale[s.tier - 1]);
-  }
-  any.store(!cars.empty(), std::memory_order_relaxed);
-}
-
-// The engine's torque: scale car+2644 for this call when the car's shot is on.
-extern "C" REX_FUNC(__imp__sub_82DF5A70);
-extern "C" REX_FUNC(sub_82DF5A70) {
-  const uint32_t car = ctx.r3.u32;
-  uint32_t saved = 0;
-  bool scaled = false;
-  if (any.load(std::memory_order_relaxed)) {
-    std::lock_guard<std::mutex> guard(lock);
-    const auto it = cars.find(car);
-    if (it != cars.end() && Enabled()) {
-      const bool was = it->second.boosting;
-      if (Step(it->second, Clock::now())) {
-        saved = Load32(base, car + kEngineTorqueScaleOffset);
-        const float scale = std::bit_cast<float>(saved) * kTierScale[it->second.tier - 1];
-        Store32(base, car + kEngineTorqueScaleOffset, std::bit_cast<uint32_t>(scale));
-        scaled = true;
-      }
-      if (was != it->second.boosting)
-        REXLOG_INFO("NITROUS: car {:08X} {} (tank {:.0f}%)", car, it->second.boosting ? "on" : "off",
-                    it->second.tank * 100.0);
+  if (first) {
+    on_this_call = false;
+    if (!Enabled()) {
+      any.store(false, std::memory_order_relaxed);
+      return;
     }
+    uint8_t* base = rex::system::kernel_state()->memory()->virtual_membase();
+    const uint32_t car = ctx.r31.u32;
+    std::lock_guard<std::mutex> guard(lock);
+    const int tier = PlayerTier(base, car);
+    if (tier <= 0) {
+      if (player.tier > 0) REXLOG_INFO("NITROUS: car {:08X} has no tier now", car);
+      player = State{};
+      any.store(false, std::memory_order_relaxed);
+      return;
+    }
+    if (player.tier != tier) {
+      player = State{};
+      player.tier = tier;
+      REXLOG_INFO("NITROUS: car {:08X} tier {} (x{})", car, tier, kTierScale[tier - 1]);
+    }
+    any.store(true, std::memory_order_relaxed);
+    const bool was = player.boosting;
+    on_this_call = Step(player, Clock::now());
+    scale_this_call = kTierScale[tier - 1];
+    if (was != player.boosting)
+      REXLOG_INFO("NITROUS: {} (tank {:.0f}%)", player.boosting ? "on" : "off", player.tank * 100.0);
   }
-  __imp__sub_82DF5A70(ctx, base);
-  if (scaled) Store32(base, car + kEngineTorqueScaleOffset, saved);
+  if (on_this_call) ctx.f0.f64 *= double(scale_this_call);
 }
+}  // namespace
+
+void ForzaNitrousTorque1_82DF5AB0(PPCRegister& r3) { ScaleF0(r3, true); }
+void ForzaNitrousTorque2_82DF5AE4(PPCRegister& r3) { ScaleF0(r3, false); }
 #endif  // FORZA_TU4
