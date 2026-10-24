@@ -8,7 +8,7 @@
 //  - the player's vehicle: root = *(0x832DF024), list = *(*(root + 4) + 4), the vector at list+0x80,
 //    the slot whose vehicle+0x2DD0 is 0 (this console's player). Its car is *(vehicle+0x2D90) and its
 //    45 installed part ids start at vehicle+0x2E58 (the same blocks world_challenge.cpp and
-//    native_car_tuning.cpp read). Fuel System is part enum 16; its ids are engine*1000+level, so
+//    native_car_tuning.cpp read). Fuel System is part enum 16, at index 18 of the list (seen in the log); its ids are engine*1000+level, so
 //    id % 1000 in 4..8 is nitrous tier 1..5.
 //  - the engine's torque (sub_82DF5A70, r31 = the car) loads car[+2644] (the engine torque scale)
 //    twice, at 82DF5AAC and 82DF5AE0, into f0 and multiplies it into the result. Mid-function hooks
@@ -60,7 +60,7 @@ constexpr uint32_t kVehicleCar = 0x2D90, kVehicleKind = 0x2DD0, kVehicleParts = 
 constexpr uint32_t kVehicleEngineObject = 0x50;  // the torque's r31 is vehicle+0x50 (seen in the log)
 constexpr int kPartCount = 45;
 constexpr uint16_t kDpadDown = 0x0002;
-constexpr int kFuelSystemPartEnum = 16;
+constexpr int kFuelSystemPartIndex = 18;  // part enum 16 + 2: the Charger's 2410007 (3x) sat at index 18
 constexpr float kTierScale[] = {1.5f, 2.0f, 2.5f, 3.0f, 4.0f};  // tiers 1..5
 constexpr int kTiers = 5;
 
@@ -119,7 +119,7 @@ int PlayerTier(uint8_t* base, uint32_t car) {
                   Load32(base, vehicle + kVehicleCar));
     if (!Plausible(vehicle) || Load32(base, vehicle + kVehicleKind) != 0) continue;
     if (vehicle + kVehicleEngineObject != car) continue;
-    const uint32_t fuel = Load32(base, vehicle + kVehicleParts + 4 * kFuelSystemPartEnum);
+    const uint32_t fuel = Load32(base, vehicle + kVehicleParts + 4 * kFuelSystemPartIndex);
     const int tier = TierOfPart(fuel);
     if (known_car != car) {
       known_car = car;
